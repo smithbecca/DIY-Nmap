@@ -1,12 +1,14 @@
-'''
-    Rebecca's DIY Nmap
-        July 2024
-          Enjoy!
-'''
+"""
+Rebecca's DIY Nmap
+July 2024
+
+A tool for scanning IP addresses and subnets for open ports and OS information.
+"""
 
 import argparse
 from datetime import datetime
 import ipaddress
+import logging
 import pyfiglet
 import nmap
 import re
@@ -14,13 +16,22 @@ import scapy.all as scapy
 import sys
 import socket
 
-# Print out sick banner
-ascii_banner = pyfiglet.figlet_format("PORT SCANNER")
-print(ascii_banner)
+def configure_logging():
+    '''
+    Configures logging for scans.
+    '''
+    log_filename = f"logfile_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+    logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s', filename=log_filename)
 
+def display_starting_banner() -> None:
+    '''
+    Displays the ASCII banner at the start of the program.
+    '''
+    ascii_banner = pyfiglet.figlet_format("PORT SCANNER")
+    print(ascii_banner)
 
 # Define a dictionary with port numbers and their associated protocol names
-port_protocols = {
+PORT_PROTOCOLS = {
     20: 'FTP Data Transfer',
     21: 'FTP',
     22: 'SSH',
@@ -73,112 +84,185 @@ port_protocols = {
     27017: 'MongoDB',
 }
 
-# Define regular expressions pattern to validate the port number input
-port_range_pattern = re.compile("([0-9]+)-([0-9]+)") 
+def arg_parser() -> argparse.Namespace:
+    '''
+    Parses command line arguments for use throughout the program.
 
-# Function to take in port range and validate
-def check_port_range(port_range):
-    try:
-        port_range_valid = port_range_pattern.search(port_range.replace(" ","")) # allows the user to use spaces in cml
-        if not port_range_valid:
-            raise ValueError("Invalid port range format. ")
-        else:
-            port_min = int(port_range_valid.group(1))
-            port_max = int(port_range_valid.group(2))
-            return port_min, port_max
-    except ValueError as ve:    # print out why they need to start over
-        print(f"Error: {ve} Enter in the criteria again.\n")
+    Returns:
+        argparse.Namespace: Parsed aurguments
+    '''
+    # Organizing command line aurguments
+    parser = argparse.ArgumentParser(description="This tool will scan for specified ports on a given IP address or subnet. You can also choose to perform additional scans on discovered devices.")
+    subnet_group = parser.add_mutually_exclusive_group(required=True)
+    subnet_group.add_argument("-sN", dest="target_subnet", type=str, help="Subnet scan (e.g., 192.168.1.0/24)")
+    subnet_group.add_argument("-t", dest="target_ipaddr", type=str, help="The target IP address (e.g., 192.168.1.1)")
+
+    # Port range argument
+    parser.add_argument("-p", dest="port_range", type=str, help="The target range of ports (e.g., 1-1000)")
+
+    # Optional arguments
+    parser.add_argument("-sT", dest="TCP_scan", action="store_true", help="Full TCP connect scan")
+    parser.add_argument("-O", dest="OS_scan", action="store_true", help="OS scan")
+
+    return parser.parse_args()
+
+def validate_port_range(port_range: str) -> tuple[int, int] | None:
+    '''
+    Validates the user given port ranges and returns the maximum and minimum of the range.
+
+    Args: 
+        port_range (str): Port range as a string.
+
+    Returns:
+        tuple[int, int]: Tuple containing maximum and minimum ports.
+
+    Raises:
+        ValueError: If the port range is invalid
+    '''
+
+    # Define regular expressions pattern to validate the port number input
+    port_range_pattern = re.compile(r"(\d+)-(\d+)")
+    match = port_range_pattern.fullmatch(port_range.replace(" ", ""))
+    if not match:
+        logging.error(f"Invalid port range format: {port_range}")
+        raise ValueError("Invalid port range format.")
+    
+    logging.info("Port range has been validated.")
+    return int(match.group(1)), int(match.group(2))
+
+def validation_ip_or_subnet(args: argparse.Namespace) -> None:
+    '''
+    Validates the user given IP address or subnet.
+
+    Arguments:
+        args (args.Namespace): Parsed command line arguments.
+    
+    Raises:
+        ValueError: If the IP address or subnet is invalid.
+    '''
+    try: 
+        if args.target_ipaddr:
+            ipaddress.ip_address(args.target_ipaddr)
+            logging.info("IP address has been validated.")
+        if args.target_subnet:
+            ipaddress.ip_network(args.target_subnet, strict=False) 
+            logging.info("Subnet has been validated.")
+    except ValueError as ve:
+        logging.error(f"Validation error: {ve}")
         sys.exit(1)
 
-# Organizing command line aurguments
-parser = argparse.ArgumentParser(description="This tool will scan for specified ports on a given IP address or subnet. You can also choose to perform additional scans on discovered devices.")
-subnet_group = parser.add_mutually_exclusive_group(required=True)
-subnet_group.add_argument("-sN", dest="target_subnet", type=str, help="Subnet scan (e.g., 192.168.1.0/24)")
-subnet_group.add_argument("-t", dest="target_ipaddr", type=str, help="The target IP address (e.g., 192.168.1.1)")
+def print_scan_results(results: list[tuple[int, str, str]], save_results: bool) -> None:
+    '''
+    Prints the result of a port scan on a target IP address.
+    Optionally saves the results to a file that saves in the user's current directory.
 
-# Port range argument
-parser.add_argument("port_range", type=str, help="The target range of ports (e.g., 1-1000)")
+    Arguments:
+        results (list[tuple[int, str, str]]): List of tuples containing port number, state of port, and protocol.
+        save_results (bool): Indicates whether or not the user wants the results saved in an output file.
+    '''
+    if save_results:
+        results_file_name = f"scan_results_{datetime.now().strftime('%Y%m%d_%H%M%S')}.log"
+        with open(results_file_name, 'w') as f:
+            logging.info("Starting to write scan results to file.")
+            f.write("PORT\t STATE\t \tSERVICE\n")
+            print("\nPORT\t STATE\t \tSERVICE\n") # Print to console as well
+            for port, protocol, state in results:
+                if state != 'closed' and not (state == 'filtered' and protocol == 'Unknown Protocol'):
+                    f.write(f"{port}\t {state}\t {protocol}\n")
+                    print(f"{port}\t {state}\t {protocol}")  # Print to console as well
 
-# Optional arguments
-parser.add_argument("-sT", dest="TCP_scan", action="store_true", help="Full TCP connect scan")
-parser.add_argument("-O", dest="OS_scan", action="store_true", help="OS scan")
-
-# Parse arguments
-args = parser.parse_args()
-
-# Validate IP addresses and call port validation function
-try:
-    if args.target_ipaddr:
-        ipaddress.ip_address(args.target_ipaddr)
-    if args.target_subnet:
-        ipaddress.ip_network(args.target_subnet, strict=False)
+            logging.info(f"Done writing scan results to file.")
+    else:
+        logging.info("Starting to print scan results.")
+        print("\nPORT\t STATE\t \tSERVICE\n")
+        for port, protocol, state in results:
+            if state != 'closed' and not (state == 'filtered' and protocol == 'Unknown Protocol'):
+                print(f"{port}\t {state}\t {protocol}")
+        
+        logging.info("Done printing scan results.")
     
-    if args.port_range:
-        port_min, port_max = check_port_range(args.port_range)
-except ValueError as ve:
-    print(f"Error: {ve} Enter in the criteria again.\n")
-    sys.exit(1)
+    print(f"Results saved in file: {results_file_name}")
 
-# Based on code stored in result, print out port state
-def print_results(results):
-    print("\nPORT\t STATE\t \tSERVICE\n")
+def print_banner_for_scans(target_ip: str) -> None:
+    '''
+    Prints the banner for scans.
 
-    for port, protocol, state in results:
-        if state != 'closed' and not (state == 'filtered' and protocol == 'Unknown Protocol'):
-            print(f"{port}\t {state}\t {protocol}")
-
-# Function to perform a full TCP connect scan
-def tcp_connect_scan(target_ip, port_min, port_max):
-    # Update banner to display the address currently being scanned
+    Arguments:
+        target_ip (str): target IP address.
+    '''
     print("_" * 50)
     print(f"Scanning Target: {target_ip}")
     print("Scan started at: " + str(datetime.now()))
     print("_" * 50)
-    
+
+def tcp_connect_scan(target_ip: str, port_min: int, port_max: int) -> None:
+    '''
+    Performs a TCP connection to each port between the range of the minimum and maximum ports.
+
+    Arguments:
+        target_ip (str): Target IP address.
+        port_min (int): Minimum port number.
+        port_max (int): Maximum port number.
+    '''
+    print_banner_for_scans(target_ip)
+    logging.info(f"Starting TCP connect scan to {target_ip}.")
     results = [] 
-    # Create a TCP connect for every port in port range
+
     for port in range(port_min, port_max + 1):
-        s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        socket.setdefaulttimeout(.5)
-        return_code = s.connect_ex((target_ip, port))
+        try:
+            s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+            socket.setdefaulttimeout(.5)
+            return_code = s.connect_ex((target_ip, port))
+            protocol = PORT_PROTOCOLS.get(port, 'Unknown Protocol') # Default protocol name in case it's not included in library
+            state = interpret_socket_return_code(return_code)
 
-        # Default protocol name in case it's not included in library
-        protocol = port_protocols.get(port, 'Unknown Protocol')
-
-        # Uses both Linux and Windows return codes
-        if return_code == 0:
-            state = 'open'
-        elif return_code == 10060 or 110:
-            state = 'filtered'
-        elif return_code == 10061 or 111:
-            state = 'closed'
-        elif return_code == 10013 or 13:
-            state = 'permission denied'
-        else:
-            state = 'unknown'
-        
-        print(".", end="", flush=True) # the illusion of progress
-        if ((port % 50) == 0 and port != 0):  # keeps it in line with other banners
-            print("\n")
-        
-        results.append((port, protocol, state))
-        s.close()
+            print(".", end="", flush=True)
+            if ((port % 50) == 0 and port != 0):  # Keeps the dots in line with other banners
+                print("\n")
+            
+            results.append((port, protocol, state))
+            s.close()
+        except socket.error as e:
+            logging.error(f"Socket error: {e}")
+            continue
     
-    print_results(results)
+    logging.info(f"Done with TCP connect scan to {target_ip}.")
+    print_scan_results(results, True)
 
-# Scan IP addresses for OS information
-def os_nmap_scan(target_ip):
-    # Update banner to display the address currently being scanned
-    print("_" * 50)
-    print("Scanning OS for: " + target_ip)
-    print("Scan started at: " + str(datetime.now()))
-    print("_" * 50)
+def interpret_socket_return_code(return_code: int) -> str:
+    '''
+    Interprets the socket return code into a port state. Uses both Linux and Windows return codes
+
+    Arguments: 
+        return_code (int): Socket return code.
+
+    Returns:
+        str: Port state.
+    '''
+    if return_code == 0:
+        return 'open'
+    if return_code == 10060 or 110:
+        return 'filtered'
+    if return_code == 10061 or 111:
+        return 'closed'
+    if return_code == 10013 or 13:
+        return 'permission denied'
+    return 'unknown'
+
+def os_nmap_scan(target_ip: str) -> None:
+    '''
+    Performs an operating system scan on target IP address.
+
+    Arguments:
+        target_ip (str): Target IP address.
+    '''
+    print_banner_for_scans(target_ip)
 
     nm = nmap.PortScanner()
     nm.scan(target_ip, arguments='-O')  # -O enables OS detection
     
-    # Check the scan results
     for host in nm.all_hosts():
+        logging.info(f"Starting OS scan on {host}.")
         print(f"Host: {host} ({nm[host].hostname()})")
         print(f"State: {nm[host].state()}")
         
@@ -191,46 +275,66 @@ def os_nmap_scan(target_ip):
                 print(f"Accuracy: {osclass['accuracy']}")
         else:
             print("OS detection not available")
-
-# Function to discover devices within a subnet
-def network_device_scan(target_subnet):
-    # Create request
-    request = scapy.ARP(pdst=target_subnet)
-
-    # Create an ethernet frame with broadcast address
-    broadcast = scapy.Ether()
-    broadcast.dst = 'ff:ff:ff:ff:ff:ff'
-
-    # Combine ethernet frame and arp request
-    request_broadcast = broadcast / request
-    # Send packet and get responses
-    clients = scapy.srp(request_broadcast, timeout=10, verbose=1)[0]
+            logging.error(f"OS detection not available on {host}.")
     
-    # Print findings
+        logging.info(f"Done with OS scan on {host}")
+    
+
+def network_device_scan(target_subnet: str, args: argparse.Namespace, port_min: int, port_max: int) -> None:
+    '''
+    Discovers devices within a given subnet.
+
+    Arguments:
+        target_subnet (str): Target IP address.
+        args (argparse.Namespace): Parsed command line arguments.
+        port_min (int): Minimum port number.
+        port_max (int): Maximum port number.
+    '''
+    request = scapy.ARP(pdst=target_subnet)
+    broadcast = scapy.Ether(dst = 'ff:ff:ff:ff:ff:ff') # Create an ethernet frame with broadcast address
+    request_broadcast = broadcast / request
+    clients = scapy.srp(request_broadcast, timeout=10, verbose=1)[0]
+    logging.info(f"Starting network scan on subnet {target_subnet}.")
+    
     for client in clients:
         print(client[1].psrc + "      " + client[1].hwsrc)
+        logging.info(f"Found device at {client}.")
 
+    # For every IP address found, if the TCP_scan flag is set, then run the scan on each addr
     if args.TCP_scan:
         for client in clients:
-            ip_address = str(client[1].psrc)  # Extract IP address as a string so function can accept it
-            tcp_connect_scan(ip_address, port_min, port_max)
+            #ip_address = str(client[1].psrc)  # Extract IP address as a string so function can accept it
+            tcp_connect_scan(client[1].psrc, port_min, port_max)
     
+    # For every IP address found, if the OS_scan flag is set, then run the scan on each addr
     if args.OS_scan:
         for client in clients:
-            ip_address = str(client[1].psrc)  # Extract IP address as a string so function can accept it
-            os_nmap_scan(ip_address)
+            #ip_address = str(client[1].psrc)  # Extract IP address as a string so function can accept it
+            os_nmap_scan(client[1].psrc)
 
+def main():
+    '''
+    Main function to run all the scripts.
+    '''
+    configure_logging()
+    display_starting_banner()
+    args = arg_parser()
+    validation_ip_or_subnet(args)
+    port_min, port_max = validate_port_range(args.port_range)
 
-# Perform scans! 
-try:
-    if args.target_subnet:
-        network_device_scan(args.target_subnet)
-    if not args.target_subnet and args.TCP_scan:
-        tcp_connect_scan(args.target_ipaddr, port_min, port_max)
-    if not args.target_subnet and args.OS_scan:
-        os_nmap_scan(args.target_ipaddr)
-    else:
-        print("\nThanks for using my scanner!\n")
-except KeyboardInterrupt:
-   print("\nExiting Program.")
-   sys.exit()
+    # Based on the flag set from command line, run those scans here
+    try:
+        if args.target_subnet:
+            network_device_scan(args.target_subnet)
+        if not args.target_subnet and args.TCP_scan:
+            tcp_connect_scan(args.target_ipaddr, port_min, port_max)
+        if not args.target_subnet and args.OS_scan:
+            os_nmap_scan(args.target_ipaddr)
+        else:
+            print("\nThanks for using my scanner!\n")
+    except KeyboardInterrupt:
+        print("\nExiting Program.")
+        sys.exit()
+
+if __name__ == "__main__":
+    main()
